@@ -32,19 +32,47 @@ class PlayerStats:
         self.connect_times = []
         self.disconnect_times = []
 
-    def add_kill(self, weapon: str = "Unknown", is_teamkill: bool = False):
+        # Advanced stats for achievements
+        self.kill_timestamps = []  # Track when kills happened
+        self.death_timestamps = []  # Track when deaths happened
+        self.victims = defaultdict(int)  # Who this player killed (name -> count)
+        self.killers = defaultdict(int)  # Who killed this player (name -> count)
+        self.kill_streaks = []  # List of kill streak lengths
+        self.current_streak = 0
+        self.longest_streak = 0
+        self.first_blood = False  # Did they get first kill?
+
+    def add_kill(self, weapon: str = "Unknown", is_teamkill: bool = False, victim_name: str = "", timestamp: int = 0):
         """Record a kill"""
         self.kills += 1
         if is_teamkill:
             self.teamkills += 1
         if weapon:
             self.weapons_used[weapon] += 1
+        if victim_name:
+            self.victims[victim_name] += 1
+        if timestamp:
+            self.kill_timestamps.append(timestamp)
 
-    def add_death(self, weapon: str = "Unknown"):
+        # Update kill streak
+        self.current_streak += 1
+        if self.current_streak > self.longest_streak:
+            self.longest_streak = self.current_streak
+
+    def add_death(self, weapon: str = "Unknown", killer_name: str = "", timestamp: int = 0):
         """Record a death"""
         self.deaths += 1
         if weapon:
             self.killed_by_weapons[weapon] += 1
+        if killer_name:
+            self.killers[killer_name] += 1
+        if timestamp:
+            self.death_timestamps.append(timestamp)
+
+        # Reset kill streak and record it
+        if self.current_streak > 0:
+            self.kill_streaks.append(self.current_streak)
+            self.current_streak = 0
 
     @property
     def kd_ratio(self) -> float:
@@ -61,6 +89,51 @@ class PlayerStats:
             playtime += (self.disconnect_times[i] - self.connect_times[i])
         return int(playtime)
 
+    @property
+    def favorite_weapon(self) -> str:
+        """Get most used weapon"""
+        if not self.weapons_used:
+            return "N/A"
+        return max(self.weapons_used.items(), key=lambda x: x[1])[0]
+
+    @property
+    def weapon_diversity(self) -> int:
+        """Number of different weapons used"""
+        return len(self.weapons_used)
+
+    @property
+    def nemesis(self) -> str:
+        """Player who killed them most"""
+        if not self.killers:
+            return "None"
+        return max(self.killers.items(), key=lambda x: x[1])[0]
+
+    @property
+    def favorite_victim(self) -> str:
+        """Player they killed most"""
+        if not self.victims:
+            return "None"
+        return max(self.victims.items(), key=lambda x: x[1])[0]
+
+    @property
+    def kills_per_minute(self) -> float:
+        """Calculate kills per minute"""
+        if self.total_playtime == 0:
+            return 0.0
+        return round((self.kills / self.total_playtime) * 60, 2)
+
+    @property
+    def average_life_duration(self) -> float:
+        """Average time between deaths in seconds"""
+        if len(self.death_timestamps) <= 1:
+            return 0.0
+
+        life_durations = []
+        for i in range(1, len(self.death_timestamps)):
+            life_durations.append(self.death_timestamps[i] - self.death_timestamps[i-1])
+
+        return round(sum(life_durations) / len(life_durations), 1) if life_durations else 0.0
+
 
 class MissionStats:
     """Stores statistics for the entire mission"""
@@ -75,6 +148,7 @@ class MissionStats:
         self.player_name_map = {}  # name -> player_id (for deduplication)
         self.weapon_stats = defaultdict(int)
         self.faction_stats = defaultdict(lambda: {"kills": 0, "deaths": 0})
+        self.first_kill_recorded = False  # Track if first blood has been awarded
 
     def get_or_create_player(self, player_id: str, name: str, bohemia_id: str = "") -> PlayerStats:
         """Get existing player or create new one"""
@@ -213,10 +287,15 @@ class LogParser:
         weapon = entry.get('KillerPlayerWeaponName', 'Unknown Weapon')
         is_teamkill = entry.get('IsTeamKill', 'false').lower() == 'true'
 
+        # Get timestamp
+        timestamp = entry.get('systemTimeInt', 0)
+        if timestamp:
+            timestamp = int(timestamp)
+
         # Update victim stats
         if victim_id and victim_name:
             victim = self.stats.get_or_create_player(victim_id, victim_name, victim_bohemia_id)
-            victim.add_death(weapon)
+            victim.add_death(weapon, killer_name, timestamp)
             if victim_faction:
                 victim.factions.add(victim_faction)
             self.stats.faction_stats[victim_faction]["deaths"] += 1
@@ -224,10 +303,15 @@ class LogParser:
         # Update killer stats
         if killer_id and killer_name:
             killer = self.stats.get_or_create_player(killer_id, killer_name, killer_bohemia_id)
-            killer.add_kill(weapon, is_teamkill)
+            killer.add_kill(weapon, is_teamkill, victim_name, timestamp)
             if killer_faction:
                 killer.factions.add(killer_faction)
             self.stats.faction_stats[killer_faction]["kills"] += 1
+
+            # Award First Blood
+            if not self.stats.first_kill_recorded and not is_teamkill:
+                killer.first_blood = True
+                self.stats.first_kill_recorded = True
 
         # Update global stats
         self.stats.total_kills += 1
@@ -303,6 +387,115 @@ class LogParser:
         for json_file in json_files:
             print(f"  Parsing: {json_file.name}")
             self.parse_file(json_file)
+
+    def calculate_achievements(self) -> Dict[str, Any]:
+        """Calculate special achievements and awards"""
+        achievements = {
+            'first_blood': None,
+            'kill_streak_king': None,
+            'sharp_shooter': None,
+            'survivor': None,
+            'rampage': None,
+            'weapon_master': None,
+            'versatile': None,
+            'dead_eye': None,
+            'glass_cannon': None,
+            'untouchable': None,
+            'team_player': None,
+            'lone_wolf': None
+        }
+
+        if not self.stats.players:
+            return achievements
+
+        players = list(self.stats.players.values())
+
+        # First Blood - player with first kill
+        for player in players:
+            if player.first_blood:
+                achievements['first_blood'] = player.name
+                break
+
+        # Kill Streak King - longest kill streak
+        max_streak = max((p.longest_streak for p in players), default=0)
+        if max_streak > 0:
+            for player in players:
+                if player.longest_streak == max_streak:
+                    achievements['kill_streak_king'] = (player.name, max_streak)
+                    break
+
+        # Sharp Shooter - highest K/D ratio (min 10 kills)
+        eligible_players = [p for p in players if p.kills >= 10]
+        if eligible_players:
+            sharpshooter = max(eligible_players, key=lambda p: p.kd_ratio)
+            achievements['sharp_shooter'] = (sharpshooter.name, sharpshooter.kd_ratio)
+
+        # Survivor - fewest deaths (min 10 kills)
+        if eligible_players:
+            survivor = min(eligible_players, key=lambda p: p.deaths)
+            achievements['survivor'] = (survivor.name, survivor.deaths)
+
+        # Rampage - most kills
+        if players:
+            rampage = max(players, key=lambda p: p.kills)
+            if rampage.kills > 0:
+                achievements['rampage'] = (rampage.name, rampage.kills)
+
+        # Weapon Master - most weapon diversity
+        if players:
+            master = max(players, key=lambda p: p.weapon_diversity)
+            if master.weapon_diversity > 1:
+                achievements['weapon_master'] = (master.name, master.weapon_diversity)
+
+        # Versatile - highest weapon diversity with min kills
+        versatile_players = [p for p in players if p.kills >= 10]
+        if versatile_players:
+            versatile = max(versatile_players, key=lambda p: p.weapon_diversity)
+            achievements['versatile'] = (versatile.name, versatile.weapon_diversity)
+
+        # Dead Eye - highest kills per minute (min 15 minutes playtime)
+        active_players = [p for p in players if p.total_playtime >= 900]  # 15 minutes
+        if active_players:
+            deadeye = max(active_players, key=lambda p: p.kills_per_minute)
+            if deadeye.kills_per_minute > 0:
+                achievements['dead_eye'] = (deadeye.name, deadeye.kills_per_minute)
+
+        # Glass Cannon - high kills but also high deaths
+        eligible_glass = [p for p in players if p.kills >= 15 and p.deaths >= 15]
+        if eligible_glass:
+            glass = max(eligible_glass, key=lambda p: p.kills + p.deaths)
+            achievements['glass_cannon'] = (glass.name, glass.kills, glass.deaths)
+
+        # Untouchable - longest average life (min 5 deaths)
+        long_life_players = [p for p in players if len(p.death_timestamps) >= 5]
+        if long_life_players:
+            untouchable = max(long_life_players, key=lambda p: p.average_life_duration)
+            if untouchable.average_life_duration > 0:
+                achievements['untouchable'] = (untouchable.name, untouchable.average_life_duration)
+
+        # Team Player - zero teamkills with min 10 kills
+        team_players = [p for p in players if p.kills >= 10 and p.teamkills == 0]
+        if team_players:
+            best_team = max(team_players, key=lambda p: p.kills)
+            achievements['team_player'] = (best_team.name, best_team.kills)
+
+        # Lone Wolf - player with most solo kills (kills where they have few victims repeated)
+        if eligible_players:
+            lone_wolves = []
+            for player in eligible_players:
+                if player.victims:
+                    # Calculate how spread out their kills are
+                    unique_victims = len(player.victims)
+                    total_kills = sum(player.victims.values())
+                    if total_kills > 0:
+                        diversity_score = unique_victims / total_kills
+                        lone_wolves.append((player, diversity_score))
+
+            if lone_wolves:
+                lone_wolf = max(lone_wolves, key=lambda x: x[1])
+                achievements['lone_wolf'] = (lone_wolf[0].name, len(lone_wolf[0].victims))
+
+        return achievements
 
     def generate_text_report(self) -> str:
         """Generate a text summary report"""
@@ -554,6 +747,44 @@ class LogParser:
             border-radius: 5px;
             font-size: 1em;
         }
+        .achievements-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .achievement-card {
+            background: linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%);
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            border-left: 5px solid #f39c12;
+            transition: transform 0.2s;
+        }
+        .achievement-card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 6px 12px rgba(0,0,0,0.15);
+        }
+        .achievement-icon {
+            font-size: 2em;
+            margin-bottom: 10px;
+        }
+        .achievement-title {
+            font-size: 1.1em;
+            font-weight: bold;
+            color: #d35400;
+            margin-bottom: 5px;
+        }
+        .achievement-player {
+            font-size: 1.3em;
+            font-weight: bold;
+            color: #2c3e50;
+            margin: 5px 0;
+        }
+        .achievement-value {
+            font-size: 0.9em;
+            color: #7f8c8d;
+        }
     </style>
 </head>
 <body>
@@ -627,9 +858,10 @@ class LogParser:
         html += '                            <th>Player Name</th>\n'
         html += '                            <th>Kills</th>\n'
         html += '                            <th>Deaths</th>\n'
-        html += '                            <th>K/D Ratio</th>\n'
-        html += '                            <th>Teamkills</th>\n'
-        html += '                            <th>Spawns</th>\n'
+        html += '                            <th>K/D</th>\n'
+        html += '                            <th>Streak</th>\n'
+        html += '                            <th>Fav Weapon</th>\n'
+        html += '                            <th>Nemesis</th>\n'
         html += '                        </tr>\n'
         html += '                    </thead>\n'
         html += '                    <tbody>\n'
@@ -640,18 +872,77 @@ class LogParser:
 
             kd_class = "kd-positive" if player.kd_ratio > 1 else ("kd-negative" if player.kd_ratio < 1 else "kd-neutral")
 
+            # Get favorite weapon (shortened)
+            fav_weapon = player.favorite_weapon
+            if len(fav_weapon) > 15:
+                fav_weapon = fav_weapon[:12] + "..."
+
+            # Get nemesis (shortened)
+            nemesis = player.nemesis
+            if len(nemesis) > 12:
+                nemesis = nemesis[:9] + "..."
+
             html += f'                        <tr>\n'
             html += f'                            <td><span class="rank-badge {rank_class}">{i}</span></td>\n'
             html += f'                            <td><strong>{player.name}</strong></td>\n'
             html += f'                            <td>{player.kills}</td>\n'
             html += f'                            <td>{player.deaths}</td>\n'
             html += f'                            <td class="{kd_class}">{player.kd_ratio}</td>\n'
-            html += f'                            <td>{player.teamkills}</td>\n'
-            html += f'                            <td>{player.spawns}</td>\n'
+            html += f'                            <td>{player.longest_streak}</td>\n'
+            html += f'                            <td>{fav_weapon}</td>\n'
+            html += f'                            <td>{nemesis}</td>\n'
             html += f'                        </tr>\n'
 
         html += '                    </tbody>\n'
         html += '                </table>\n'
+        html += '            </div>\n'
+
+        # Achievements Section
+        achievements = self.calculate_achievements()
+        html += '            <div class="section">\n'
+        html += '                <h2>🏅 Achievements & Special Awards</h2>\n'
+        html += '                <div class="achievements-grid">\n'
+
+        # Achievement mapping with icons and descriptions
+        achievement_map = {
+            'first_blood': ('🩸', 'First Blood', 'Got the first kill of the match'),
+            'kill_streak_king': ('🔥', 'Kill Streak King', 'Longest kill streak: {}'),
+            'sharp_shooter': ('🎯', 'Sharp Shooter', 'Highest K/D ratio: {}'),
+            'survivor': ('🛡️', 'Survivor', 'Fewest deaths: {}'),
+            'rampage': ('💀', 'Rampage', 'Most kills: {}'),
+            'weapon_master': ('🔫', 'Weapon Master', 'Used {} different weapons'),
+            'versatile': ('🎲', 'Versatile', 'Most versatile: {} weapons'),
+            'dead_eye': ('👁️', 'Dead Eye', '{} kills/min'),
+            'glass_cannon': ('💥', 'Glass Cannon', '{} kills, {} deaths'),
+            'untouchable': ('👻', 'Untouchable', 'Avg life: {}s'),
+            'team_player': ('🤝', 'Team Player', 'Zero teamkills, {} kills'),
+            'lone_wolf': ('🐺', 'Lone Wolf', 'Killed {} different players')
+        }
+
+        for key, value in achievements.items():
+            if value is not None:
+                icon, title, desc_template = achievement_map.get(key, ('🏆', key.replace('_', ' ').title(), '{}'))
+
+                if isinstance(value, tuple):
+                    player_name = value[0]
+                    if len(value) == 2:
+                        description = desc_template.format(value[1])
+                    elif len(value) == 3:
+                        description = desc_template.format(value[1], value[2])
+                    else:
+                        description = desc_template
+                else:
+                    player_name = value
+                    description = desc_template
+
+                html += f'                    <div class="achievement-card">\n'
+                html += f'                        <div class="achievement-icon">{icon}</div>\n'
+                html += f'                        <div class="achievement-title">{title}</div>\n'
+                html += f'                        <div class="achievement-player">{player_name}</div>\n'
+                html += f'                        <div class="achievement-value">{description}</div>\n'
+                html += f'                    </div>\n'
+
+        html += '                </div>\n'
         html += '            </div>\n'
 
         # Weapon Statistics
