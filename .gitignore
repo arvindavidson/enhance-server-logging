@@ -1,2 +1,8 @@
 resourceDatabase.rdb
 worlds
+
+# Generated stats reports (output from stats_parser.py)
+*.txt
+*.html
+*.csv
+!example_report.html
