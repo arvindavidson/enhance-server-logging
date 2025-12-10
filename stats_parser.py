@@ -137,16 +137,21 @@ class PlayerStats:
 
 class MissionStats:
     """Stores statistics for the entire mission"""
-    def __init__(self):
+    def __init__(self, pve_mode: bool = False):
+        self.pve_mode = pve_mode
         self.start_time = None
         self.end_time = None
         self.end_reason = None
         self.total_kills = 0
         self.total_deaths = 0
         self.total_teamkills = 0
+        self.total_ai_deaths = 0  # Deaths from AI (PvE mode)
+        self.total_suicides = 0
+        self.total_other_deaths = 0
         self.players = {}  # player_id -> PlayerStats
         self.player_name_map = {}  # name -> player_id (for deduplication)
         self.weapon_stats = defaultdict(int)
+        self.ai_weapon_stats = defaultdict(int)  # Weapons used by AI (PvE mode)
         self.faction_stats = defaultdict(lambda: {"kills": 0, "deaths": 0})
         self.first_kill_recorded = False  # Track if first blood has been awarded
 
@@ -185,9 +190,10 @@ class MissionStats:
 class LogParser:
     """Parses Reforger server logs"""
 
-    def __init__(self, log_directory: Path):
+    def __init__(self, log_directory: Path, pve_mode: bool = False):
         self.log_directory = Path(log_directory)
-        self.stats = MissionStats()
+        self.pve_mode = pve_mode
+        self.stats = MissionStats(pve_mode=pve_mode)
 
     def parse_log_line(self, line: str) -> Dict[str, Any]:
         """Parse a single log line"""
@@ -279,46 +285,71 @@ class LogParser:
 
         # Killer information
         killer_id = entry.get('KillerPlayerID', '')
-        killer_name = entry.get('KillerPlayerName', 'Unknown')
+        killer_name = entry.get('KillerPlayerName', '')
         killer_bohemia_id = entry.get('KillerPlayerBiId', '')
         killer_faction = entry.get('KillerPlayerFaction', '')
 
-        # Weapon and teamkill info
+        # Weapon and death type info
         weapon = entry.get('KillerPlayerWeaponName', 'Unknown Weapon')
-        is_teamkill = entry.get('IsTeamKill', 'false').lower() == 'true'
+        is_teamkill = entry.get('IsTeamKill', '0') == '1' or entry.get('IsTeamKill', 'false').lower() == 'true'
+        relation = entry.get('Relation', '')
 
         # Get timestamp
         timestamp = entry.get('systemTimeInt', 0)
         if timestamp:
             timestamp = int(timestamp)
 
-        # Update victim stats
+        # Determine death type
+        is_ai_kill = (killer_id == '0' and relation == 'KILLED_BY_ENEMY_AI')
+        is_suicide = (relation == 'SUICIDE')
+        is_other_death = (relation == 'OTHER_DEATH')
+
+        # Update victim stats (always update victim)
         if victim_id and victim_name:
             victim = self.stats.get_or_create_player(victim_id, victim_name, victim_bohemia_id)
-            victim.add_death(weapon, killer_name, timestamp)
+            victim.add_death(weapon, killer_name if killer_name else "AI" if is_ai_kill else "Environment", timestamp)
             if victim_faction:
                 victim.factions.add(victim_faction)
             self.stats.faction_stats[victim_faction]["deaths"] += 1
 
-        # Update killer stats
-        if killer_id and killer_name:
+        # Update killer stats (only if it's a real player kill, not AI)
+        if not is_ai_kill and killer_id and killer_id != '0' and killer_name:
             killer = self.stats.get_or_create_player(killer_id, killer_name, killer_bohemia_id)
             killer.add_kill(weapon, is_teamkill, victim_name, timestamp)
             if killer_faction:
                 killer.factions.add(killer_faction)
-            self.stats.faction_stats[killer_faction]["kills"] += 1
 
-            # Award First Blood
-            if not self.stats.first_kill_recorded and not is_teamkill:
+            # Only count faction kills for player kills, not suicides
+            if not is_suicide:
+                self.stats.faction_stats[killer_faction]["kills"] += 1
+
+            # Award First Blood (only for non-teamkill, non-suicide)
+            if not self.stats.first_kill_recorded and not is_teamkill and not is_suicide:
                 killer.first_blood = True
                 self.stats.first_kill_recorded = True
 
         # Update global stats
-        self.stats.total_kills += 1
         self.stats.total_deaths += 1
-        if is_teamkill:
+
+        if is_ai_kill:
+            self.stats.total_ai_deaths += 1
+            self.stats.ai_weapon_stats[weapon] += 1
+        elif is_suicide:
+            self.stats.total_suicides += 1
+        elif is_other_death:
+            self.stats.total_other_deaths += 1
+        elif is_teamkill:
             self.stats.total_teamkills += 1
-        self.stats.weapon_stats[weapon] += 1
+            self.stats.total_kills += 1  # Teamkill is still a player kill
+        else:
+            self.stats.total_kills += 1  # Other player kills
+
+        # Track weapon stats
+        if is_ai_kill:
+            # In PvE mode, track AI weapons separately
+            pass  # Already tracked in ai_weapon_stats above
+        else:
+            self.stats.weapon_stats[weapon] += 1
 
     def process_player_connected(self, entry: Dict[str, Any]):
         """Process player connected event"""
@@ -486,7 +517,10 @@ class LogParser:
         """Generate a text summary report"""
         lines = []
         lines.append("=" * 80)
-        lines.append("REFORGER MISSION STATISTICS REPORT")
+        if self.pve_mode:
+            lines.append("REFORGER PvE MISSION STATISTICS REPORT")
+        else:
+            lines.append("REFORGER MISSION STATISTICS REPORT")
         lines.append("=" * 80)
         lines.append("")
 
@@ -505,8 +539,16 @@ class LogParser:
         if self.stats.end_reason:
             lines.append(f"End Reason: {self.stats.end_reason}")
         lines.append(f"Total Players: {self.stats.total_players}")
-        lines.append(f"Total Kills:   {self.stats.total_kills}")
-        lines.append(f"Total Teamkills: {self.stats.total_teamkills}")
+
+        if self.pve_mode:
+            lines.append(f"Total Deaths: {self.stats.total_deaths}")
+            lines.append(f"  - Deaths from AI: {self.stats.total_ai_deaths}")
+            lines.append(f"  - Suicides: {self.stats.total_suicides}")
+            lines.append(f"  - Teamkills: {self.stats.total_teamkills}")
+            lines.append(f"  - Other: {self.stats.total_other_deaths}")
+        else:
+            lines.append(f"Total Kills:   {self.stats.total_kills}")
+            lines.append(f"Total Teamkills: {self.stats.total_teamkills}")
         lines.append("")
 
         # Faction stats
@@ -515,11 +557,21 @@ class LogParser:
             lines.append("-" * 80)
             for faction, stats in sorted(self.stats.faction_stats.items()):
                 if faction:
-                    lines.append(f"{faction}: {stats['kills']} kills, {stats['deaths']} deaths")
+                    if self.pve_mode:
+                        lines.append(f"{faction}: {stats['deaths']} deaths")
+                    else:
+                        lines.append(f"{faction}: {stats['kills']} kills, {stats['deaths']} deaths")
             lines.append("")
 
-        # Top weapons
-        if self.stats.weapon_stats:
+        # Weapon stats
+        if self.pve_mode and self.stats.ai_weapon_stats:
+            lines.append("TOP AI WEAPONS (weapons that killed players)")
+            lines.append("-" * 80)
+            top_weapons = sorted(self.stats.ai_weapon_stats.items(), key=lambda x: x[1], reverse=True)[:10]
+            for i, (weapon, kills) in enumerate(top_weapons, 1):
+                lines.append(f"{i:2}. {weapon}: {kills} kills")
+            lines.append("")
+        elif self.stats.weapon_stats:
             lines.append("TOP WEAPONS (by kills)")
             lines.append("-" * 80)
             top_weapons = sorted(self.stats.weapon_stats.items(), key=lambda x: x[1], reverse=True)[:10]
@@ -529,17 +581,28 @@ class LogParser:
 
         # Player leaderboard
         if self.stats.players:
-            lines.append("PLAYER LEADERBOARD (by kills)")
-            lines.append("-" * 80)
-            sorted_players = sorted(self.stats.players.values(), key=lambda p: p.kills, reverse=True)[:20]
-
-            lines.append(f"{'#':<4} {'Player Name':<25} {'Kills':<8} {'Deaths':<8} {'K/D':<8} {'TKs':<6}")
-            lines.append("-" * 80)
-            for i, player in enumerate(sorted_players, 1):
-                lines.append(
-                    f"{i:<4} {player.name[:24]:<25} {player.kills:<8} {player.deaths:<8} "
-                    f"{player.kd_ratio:<8} {player.teamkills:<6}"
-                )
+            if self.pve_mode:
+                lines.append("PLAYER SURVIVAL LEADERBOARD (by fewest deaths)")
+                lines.append("-" * 80)
+                sorted_players = sorted(self.stats.players.values(), key=lambda p: p.deaths)[:20]
+                lines.append(f"{'#':<4} {'Player Name':<25} {'Deaths':<8} {'Spawns':<8} {'TKs':<6}")
+                lines.append("-" * 80)
+                for i, player in enumerate(sorted_players, 1):
+                    lines.append(
+                        f"{i:<4} {player.name[:24]:<25} {player.deaths:<8} {player.spawns:<8} "
+                        f"{player.teamkills:<6}"
+                    )
+            else:
+                lines.append("PLAYER LEADERBOARD (by kills)")
+                lines.append("-" * 80)
+                sorted_players = sorted(self.stats.players.values(), key=lambda p: p.kills, reverse=True)[:20]
+                lines.append(f"{'#':<4} {'Player Name':<25} {'Kills':<8} {'Deaths':<8} {'K/D':<8} {'TKs':<6}")
+                lines.append("-" * 80)
+                for i, player in enumerate(sorted_players, 1):
+                    lines.append(
+                        f"{i:<4} {player.name[:24]:<25} {player.kills:<8} {player.deaths:<8} "
+                        f"{player.kd_ratio:<8} {player.teamkills:<6}"
+                    )
 
         return "\n".join(lines)
 
@@ -795,12 +858,22 @@ class LogParser:
         else:
             duration_str = "N/A"
 
-        stats_cards = [
-            ("Duration", duration_str),
-            ("Total Players", str(self.stats.total_players)),
-            ("Total Kills", str(self.stats.total_kills)),
-            ("Teamkills", str(self.stats.total_teamkills)),
-        ]
+        if self.pve_mode:
+            stats_cards = [
+                ("Duration", duration_str),
+                ("Total Players", str(self.stats.total_players)),
+                ("Total Deaths", str(self.stats.total_deaths)),
+                ("AI Kills", str(self.stats.total_ai_deaths)),
+                ("Suicides", str(self.stats.total_suicides)),
+                ("Teamkills", str(self.stats.total_teamkills)),
+            ]
+        else:
+            stats_cards = [
+                ("Duration", duration_str),
+                ("Total Players", str(self.stats.total_players)),
+                ("Total Kills", str(self.stats.total_kills)),
+                ("Teamkills", str(self.stats.total_teamkills)),
+            ]
 
         if self.stats.end_reason:
             stats_cards.append(("End Reason", self.stats.end_reason))
@@ -834,43 +907,60 @@ class LogParser:
 
         # Player Leaderboard
         html += '            <div class="section">\n'
-        html += '                <h2>🏆 Player Leaderboard</h2>\n'
+        if self.pve_mode:
+            html += '                <h2>🏆 Player Survival Leaderboard</h2>\n'
+        else:
+            html += '                <h2>🏆 Player Leaderboard</h2>\n'
         html += '                <input type="text" class="search-box" id="playerSearch" placeholder="Search players..." onkeyup="filterTable(\'playerTable\', \'playerSearch\')">\n'
         html += '                <table id="playerTable">\n'
         html += '                    <thead>\n'
         html += '                        <tr>\n'
         html += '                            <th>Rank</th>\n'
         html += '                            <th>Player Name</th>\n'
-        html += '                            <th>Kills</th>\n'
-        html += '                            <th>Deaths</th>\n'
-        html += '                            <th>K/D</th>\n'
-        html += '                            <th>Streak</th>\n'
-        html += '                            <th>Fav Weapon</th>\n'
-        html += '                            <th>Teamkills</th>\n'
+        if self.pve_mode:
+            html += '                            <th>Deaths</th>\n'
+            html += '                            <th>Spawns</th>\n'
+            html += '                            <th>Teamkills</th>\n'
+        else:
+            html += '                            <th>Kills</th>\n'
+            html += '                            <th>Deaths</th>\n'
+            html += '                            <th>K/D</th>\n'
+            html += '                            <th>Streak</th>\n'
+            html += '                            <th>Fav Weapon</th>\n'
+            html += '                            <th>Teamkills</th>\n'
         html += '                        </tr>\n'
         html += '                    </thead>\n'
         html += '                    <tbody>\n'
 
-        sorted_players = sorted(self.stats.players.values(), key=lambda p: p.kills, reverse=True)
+        if self.pve_mode:
+            sorted_players = sorted(self.stats.players.values(), key=lambda p: p.deaths)
+        else:
+            sorted_players = sorted(self.stats.players.values(), key=lambda p: p.kills, reverse=True)
+
         for i, player in enumerate(sorted_players, 1):
             rank_class = f"rank-{i}" if i <= 3 else "rank-other"
-
-            kd_class = "kd-positive" if player.kd_ratio > 1 else ("kd-negative" if player.kd_ratio < 1 else "kd-neutral")
-
-            # Get favorite weapon (shortened)
-            fav_weapon = player.favorite_weapon
-            if len(fav_weapon) > 15:
-                fav_weapon = fav_weapon[:12] + "..."
 
             html += f'                        <tr>\n'
             html += f'                            <td><span class="rank-badge {rank_class}">{i}</span></td>\n'
             html += f'                            <td><strong>{player.name}</strong></td>\n'
-            html += f'                            <td>{player.kills}</td>\n'
-            html += f'                            <td>{player.deaths}</td>\n'
-            html += f'                            <td class="{kd_class}">{player.kd_ratio}</td>\n'
-            html += f'                            <td>{player.longest_streak}</td>\n'
-            html += f'                            <td>{fav_weapon}</td>\n'
-            html += f'                            <td>{player.teamkills}</td>\n'
+
+            if self.pve_mode:
+                html += f'                            <td>{player.deaths}</td>\n'
+                html += f'                            <td>{player.spawns}</td>\n'
+                html += f'                            <td>{player.teamkills}</td>\n'
+            else:
+                kd_class = "kd-positive" if player.kd_ratio > 1 else ("kd-negative" if player.kd_ratio < 1 else "kd-neutral")
+                fav_weapon = player.favorite_weapon
+                if len(fav_weapon) > 15:
+                    fav_weapon = fav_weapon[:12] + "..."
+
+                html += f'                            <td>{player.kills}</td>\n'
+                html += f'                            <td>{player.deaths}</td>\n'
+                html += f'                            <td class="{kd_class}">{player.kd_ratio}</td>\n'
+                html += f'                            <td>{player.longest_streak}</td>\n'
+                html += f'                            <td>{fav_weapon}</td>\n'
+                html += f'                            <td>{player.teamkills}</td>\n'
+
             html += f'                        </tr>\n'
 
         html += '                    </tbody>\n'
@@ -925,9 +1015,14 @@ class LogParser:
         html += '            </div>\n'
 
         # Weapon Statistics
-        if self.stats.weapon_stats:
+        weapon_data_available = (self.pve_mode and self.stats.ai_weapon_stats) or (not self.pve_mode and self.stats.weapon_stats)
+        if weapon_data_available:
             html += '            <div class="section">\n'
-            html += '                <h2>🔫 Weapon Statistics</h2>\n'
+            if self.pve_mode:
+                html += '                <h2>🔫 AI Weapon Statistics</h2>\n'
+                html += '                <p style="text-align: center; color: #666; margin-bottom: 20px;">Weapons used by AI enemies to kill players</p>\n'
+            else:
+                html += '                <h2>🔫 Weapon Statistics</h2>\n'
             html += '                <table>\n'
             html += '                    <thead>\n'
             html += '                        <tr>\n'
@@ -939,9 +1034,15 @@ class LogParser:
             html += '                    </thead>\n'
             html += '                    <tbody>\n'
 
-            sorted_weapons = sorted(self.stats.weapon_stats.items(), key=lambda x: x[1], reverse=True)[:15]
+            if self.pve_mode:
+                sorted_weapons = sorted(self.stats.ai_weapon_stats.items(), key=lambda x: x[1], reverse=True)[:15]
+                total_ai_kills = self.stats.total_ai_deaths
+            else:
+                sorted_weapons = sorted(self.stats.weapon_stats.items(), key=lambda x: x[1], reverse=True)[:15]
+                total_ai_kills = self.stats.total_kills
+
             for i, (weapon, kills) in enumerate(sorted_weapons, 1):
-                percentage = (kills / self.stats.total_kills * 100) if self.stats.total_kills > 0 else 0
+                percentage = (kills / total_ai_kills * 100) if total_ai_kills > 0 else 0
                 rank_class = f"rank-{i}" if i <= 3 else "rank-other"
 
                 html += f'                        <tr>\n'
@@ -1052,11 +1153,16 @@ def main():
         default='mission_report',
         help='Output file prefix (default: mission_report)'
     )
+    parser.add_argument(
+        '--pve',
+        action='store_true',
+        help='PvE mode: Focus on survival stats (player deaths from AI) instead of kill counts'
+    )
 
     args = parser.parse_args()
 
     # Parse logs
-    log_parser = LogParser(args.log_directory)
+    log_parser = LogParser(args.log_directory, pve_mode=args.pve)
     log_parser.parse_directory(recursive=args.recursive)
 
     # Generate reports

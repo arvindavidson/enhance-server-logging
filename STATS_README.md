@@ -91,6 +91,47 @@ This generates:
 - `SpecialOps_Mission_Alpha_players.csv`
 - `SpecialOps_Mission_Alpha_weapons.csv`
 
+### PvE Mode
+
+**Important:** Use the `--pve` flag for PvE (Player vs Environment) servers where players fight AI enemies:
+
+```bash
+python3 stats_parser.py /path/to/logs --pve -o "PvE_Mission"
+```
+
+**Why PvE mode is necessary:**
+
+The Enhanced Server Logging mod only logs when **players die**, not when players kill AI enemies. This is a limitation of Arma Reforger's event system. In PvE mode, the parser:
+
+- **Focuses on survival statistics** instead of kill counts
+- Shows **deaths from AI, suicides, teamkills, and environmental deaths**
+- Displays **AI weapons** that killed players (not player weapons)
+- Sorts leaderboard by **fewest deaths** (survival ranking)
+- Removes kill-based achievements (not applicable in PvE)
+
+**PvE Mode Output Example:**
+
+```
+Total Deaths: 20
+  - Deaths from AI: 14
+  - Suicides: 4
+  - Teamkills: 1
+  - Other: 1
+
+TOP AI WEAPONS (weapons that killed players)
+1. PKM: 4 kills
+2. RPK74M: 3 kills
+
+PLAYER SURVIVAL LEADERBOARD (by fewest deaths)
+#    Player Name     Deaths   Spawns   TKs
+1    BestSurvivor    0        1        0
+2    SecondPlace     1        2        0
+```
+
+**Without `--pve` flag:** The parser assumes PvP gameplay and tracks player kills/deaths between players.
+
+**With `--pve` flag:** The parser focuses on player deaths from AI and survival statistics.
+
 ## Examples
 
 ### Example 1: Single Mission Analysis
@@ -124,6 +165,16 @@ For a special ops mission with custom naming:
 ```bash
 python3 stats_parser.py /path/to/ServerProfile/flabby/2025/12/25 -o "Christmas_Special_Ops"
 ```
+
+### Example 5: PvE Mission Analysis
+
+For PvE (co-op) servers where players fight AI enemies:
+
+```bash
+python3 stats_parser.py /path/to/ServerProfile/flabby/2025/12/10 --pve -o "PvE_Survival_Stats"
+```
+
+This generates survival-focused statistics showing deaths from AI, suicides, and teamkills, with a leaderboard sorted by fewest deaths (best survivors).
 
 ## Output Files
 
@@ -204,7 +255,7 @@ Weapon performance data:
 ## Command Line Options
 
 ```
-usage: stats_parser.py [-h] [-r] [-o OUTPUT] log_directory
+usage: stats_parser.py [-h] [-r] [-o OUTPUT] [--pve] log_directory
 
 Parse Reforger Enhanced Server Logging JSON logs and generate statistics
 
@@ -217,6 +268,8 @@ optional arguments:
   -r, --recursive       Recursively search for JSON files in subdirectories
   -o OUTPUT, --output OUTPUT
                         Output file prefix (default: mission_report)
+  --pve                 PvE mode: Focus on survival stats (player deaths from AI)
+                        instead of kill counts
 ```
 
 ## Log File Structure
