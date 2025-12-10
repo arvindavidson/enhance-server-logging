@@ -6,3 +6,4 @@ worlds
 *.html
 *.csv
 !example_report.html
+!example_pve_report.html
