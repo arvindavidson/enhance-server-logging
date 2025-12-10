@@ -389,7 +389,7 @@ class LogParser:
             self.parse_file(json_file)
 
     def calculate_achievements(self) -> Dict[str, Any]:
-        """Calculate special achievements and awards"""
+        """Calculate special achievements and awards (PvE optimized)"""
         achievements = {
             'first_blood': None,
             'kill_streak_king': None,
@@ -401,8 +401,7 @@ class LogParser:
             'dead_eye': None,
             'glass_cannon': None,
             'untouchable': None,
-            'team_player': None,
-            'lone_wolf': None
+            'team_player': None
         }
 
         if not self.stats.players:
@@ -479,21 +478,7 @@ class LogParser:
             best_team = max(team_players, key=lambda p: p.kills)
             achievements['team_player'] = (best_team.name, best_team.kills)
 
-        # Lone Wolf - player with most solo kills (kills where they have few victims repeated)
-        if eligible_players:
-            lone_wolves = []
-            for player in eligible_players:
-                if player.victims:
-                    # Calculate how spread out their kills are
-                    unique_victims = len(player.victims)
-                    total_kills = sum(player.victims.values())
-                    if total_kills > 0:
-                        diversity_score = unique_victims / total_kills
-                        lone_wolves.append((player, diversity_score))
-
-            if lone_wolves:
-                lone_wolf = max(lone_wolves, key=lambda x: x[1])
-                achievements['lone_wolf'] = (lone_wolf[0].name, len(lone_wolf[0].victims))
+        # Note: Lone Wolf achievement removed - not applicable in PvE scenarios
 
         return achievements
 
@@ -861,7 +846,7 @@ class LogParser:
         html += '                            <th>K/D</th>\n'
         html += '                            <th>Streak</th>\n'
         html += '                            <th>Fav Weapon</th>\n'
-        html += '                            <th>Nemesis</th>\n'
+        html += '                            <th>Teamkills</th>\n'
         html += '                        </tr>\n'
         html += '                    </thead>\n'
         html += '                    <tbody>\n'
@@ -877,11 +862,6 @@ class LogParser:
             if len(fav_weapon) > 15:
                 fav_weapon = fav_weapon[:12] + "..."
 
-            # Get nemesis (shortened)
-            nemesis = player.nemesis
-            if len(nemesis) > 12:
-                nemesis = nemesis[:9] + "..."
-
             html += f'                        <tr>\n'
             html += f'                            <td><span class="rank-badge {rank_class}">{i}</span></td>\n'
             html += f'                            <td><strong>{player.name}</strong></td>\n'
@@ -890,7 +870,7 @@ class LogParser:
             html += f'                            <td class="{kd_class}">{player.kd_ratio}</td>\n'
             html += f'                            <td>{player.longest_streak}</td>\n'
             html += f'                            <td>{fav_weapon}</td>\n'
-            html += f'                            <td>{nemesis}</td>\n'
+            html += f'                            <td>{player.teamkills}</td>\n'
             html += f'                        </tr>\n'
 
         html += '                    </tbody>\n'
@@ -903,20 +883,19 @@ class LogParser:
         html += '                <h2>🏅 Achievements & Special Awards</h2>\n'
         html += '                <div class="achievements-grid">\n'
 
-        # Achievement mapping with icons and descriptions
+        # Achievement mapping with icons and descriptions (PvE focused)
         achievement_map = {
             'first_blood': ('🩸', 'First Blood', 'Got the first kill of the match'),
             'kill_streak_king': ('🔥', 'Kill Streak King', 'Longest kill streak: {}'),
             'sharp_shooter': ('🎯', 'Sharp Shooter', 'Highest K/D ratio: {}'),
             'survivor': ('🛡️', 'Survivor', 'Fewest deaths: {}'),
-            'rampage': ('💀', 'Rampage', 'Most kills: {}'),
+            'rampage': ('💀', 'Rampage', 'Most enemy kills: {}'),
             'weapon_master': ('🔫', 'Weapon Master', 'Used {} different weapons'),
             'versatile': ('🎲', 'Versatile', 'Most versatile: {} weapons'),
             'dead_eye': ('👁️', 'Dead Eye', '{} kills/min'),
             'glass_cannon': ('💥', 'Glass Cannon', '{} kills, {} deaths'),
             'untouchable': ('👻', 'Untouchable', 'Avg life: {}s'),
-            'team_player': ('🤝', 'Team Player', 'Zero teamkills, {} kills'),
-            'lone_wolf': ('🐺', 'Lone Wolf', 'Killed {} different players')
+            'team_player': ('🤝', 'Team Player', 'Zero teamkills, {} kills')
         }
 
         for key, value in achievements.items():
